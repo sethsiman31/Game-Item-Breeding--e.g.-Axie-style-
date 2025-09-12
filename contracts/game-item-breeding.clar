@@ -8,6 +8,10 @@
 (define-constant err-creature-exhausted (err u106))
 (define-constant err-same-creature (err u107))
 (define-constant err-insufficient-health (err u108))
+(define-constant err-not-for-sale (err u109))
+(define-constant err-insufficient-payment (err u110))
+(define-constant err-already-listed (err u111))
+(define-constant err-cannot-buy-own (err u112))
 
 (define-non-fungible-token creature uint)
 
@@ -17,6 +21,8 @@
 (define-data-var battle-cooldown uint u72)
 (define-data-var battle-reward uint u100000)
 (define-data-var next-battle-id uint u1)
+(define-data-var marketplace-fee-percent uint u5)
+(define-data-var next-listing-id uint u1)
 
 (define-map creature-data
   uint
@@ -49,6 +55,22 @@
     block-height: uint,
     reward-amount: uint
   }
+)
+
+(define-map marketplace-listings
+  uint
+  {
+    creature-id: uint,
+    seller: principal,
+    price: uint,
+    listed-at: uint,
+    active: bool
+  }
+)
+
+(define-map creature-to-listing
+  uint
+  uint
 )
 
 (define-read-only (get-creature (creature-id uint))
@@ -121,6 +143,24 @@
       (final-damage (+ (- base-damage defense-reduction) damage-variation))
     )
     (if (< final-damage u1) u1 final-damage)
+  )
+)
+
+(define-read-only (get-marketplace-listing (listing-id uint))
+  (map-get? marketplace-listings listing-id)
+)
+
+(define-read-only (get-creature-listing (creature-id uint))
+  (match (map-get? creature-to-listing creature-id)
+    listing-id (get-marketplace-listing listing-id)
+    none
+  )
+)
+
+(define-read-only (is-creature-for-sale (creature-id uint))
+  (match (get-creature-listing creature-id)
+    listing (get active listing)
+    false
   )
 )
 
@@ -303,6 +343,79 @@
   )
 )
 
+(define-public (list-creature-for-sale (creature-id uint) (price uint))
+  (let
+    (
+      (creature-info (unwrap! (get-creature creature-id) err-not-found))
+      (listing-id (var-get next-listing-id))
+    )
+    (asserts! (is-eq tx-sender (get owner creature-info)) err-unauthorized)
+    (asserts! (not (is-creature-for-sale creature-id)) err-already-listed)
+    (asserts! (> price u0) err-insufficient-payment)
+    
+    (map-set marketplace-listings listing-id
+      {
+        creature-id: creature-id,
+        seller: tx-sender,
+        price: price,
+        listed-at: stacks-block-height,
+        active: true
+      }
+    )
+    
+    (map-set creature-to-listing creature-id listing-id)
+    (var-set next-listing-id (+ listing-id u1))
+    (ok listing-id)
+  )
+)
+
+(define-public (cancel-listing (creature-id uint))
+  (let
+    (
+      (creature-info (unwrap! (get-creature creature-id) err-not-found))
+      (listing-id (unwrap! (map-get? creature-to-listing creature-id) err-not-for-sale))
+      (listing (unwrap! (get-marketplace-listing listing-id) err-not-for-sale))
+    )
+    (asserts! (is-eq tx-sender (get seller listing)) err-unauthorized)
+    (asserts! (get active listing) err-not-for-sale)
+    
+    (map-set marketplace-listings listing-id (merge listing { active: false }))
+    (map-delete creature-to-listing creature-id)
+    (ok true)
+  )
+)
+
+(define-public (buy-creature (creature-id uint))
+  (let
+    (
+      (creature-info (unwrap! (get-creature creature-id) err-not-found))
+      (listing-id (unwrap! (map-get? creature-to-listing creature-id) err-not-for-sale))
+      (listing (unwrap! (get-marketplace-listing listing-id) err-not-for-sale))
+      (price (get price listing))
+      (seller (get seller listing))
+      (marketplace-fee (/ (* price (var-get marketplace-fee-percent)) u100))
+      (seller-amount (- price marketplace-fee))
+    )
+    (asserts! (get active listing) err-not-for-sale)
+    (asserts! (not (is-eq tx-sender seller)) err-cannot-buy-own)
+    
+    (try! (stx-transfer? marketplace-fee tx-sender contract-owner))
+    (try! (stx-transfer? seller-amount tx-sender seller))
+    (try! (nft-transfer? creature creature-id seller tx-sender))
+    
+    (map-set creature-data creature-id (merge creature-info { owner: tx-sender }))
+    (map-set marketplace-listings listing-id (merge listing { active: false }))
+    (map-delete creature-to-listing creature-id)
+    
+    (ok { 
+      creature-id: creature-id, 
+      price: price, 
+      seller: seller,
+      marketplace-fee: marketplace-fee
+    })
+  )
+)
+
 (define-public (set-breeding-cost (new-cost uint))
   (begin
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
@@ -373,4 +486,28 @@
     })
     none
   )
+)
+
+(define-public (set-marketplace-fee (new-fee-percent uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (<= new-fee-percent u20) err-insufficient-payment)
+    (var-set marketplace-fee-percent new-fee-percent)
+    (ok true)
+  )
+)
+
+(define-read-only (get-marketplace-fee-percent)
+  (var-get marketplace-fee-percent)
+)
+
+(define-read-only (get-next-listing-id)
+  (var-get next-listing-id)
+)
+
+(define-read-only (get-marketplace-stats)
+  {
+    total-listings: (var-get next-listing-id),
+    fee-percent: (var-get marketplace-fee-percent)
+  }
 )
