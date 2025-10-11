@@ -12,6 +12,9 @@
 (define-constant err-insufficient-payment (err u110))
 (define-constant err-already-listed (err u111))
 (define-constant err-cannot-buy-own (err u112))
+(define-constant err-already-staked (err u113))
+(define-constant err-not-staked (err u114))
+(define-constant err-minimum-stake-period (err u115))
 
 (define-non-fungible-token creature uint)
 
@@ -23,6 +26,9 @@
 (define-data-var next-battle-id uint u1)
 (define-data-var marketplace-fee-percent uint u5)
 (define-data-var next-listing-id uint u1)
+(define-data-var staking-reward-rate uint u100)
+(define-data-var minimum-stake-period uint u144)
+(define-data-var total-staked-creatures uint u0)
 
 (define-map creature-data
   uint
@@ -71,6 +77,16 @@
 (define-map creature-to-listing
   uint
   uint
+)
+
+(define-map staked-creatures
+  uint
+  {
+    staker: principal,
+    staked-at: uint,
+    last-claim: uint,
+    total-claimed: uint
+  }
 )
 
 (define-read-only (get-creature (creature-id uint))
@@ -161,6 +177,33 @@
   (match (get-creature-listing creature-id)
     listing (get active listing)
     false
+  )
+)
+
+(define-read-only (get-staking-info (creature-id uint))
+  (map-get? staked-creatures creature-id)
+)
+
+(define-read-only (is-staked (creature-id uint))
+  (is-some (get-staking-info creature-id))
+)
+
+(define-read-only (calculate-staking-rewards (creature-id uint))
+  (match (get-staking-info creature-id)
+    stake-info
+    (let
+      (
+        (creature-info (unwrap! (get-creature creature-id) u0))
+        (creature-power (get-creature-power creature-id))
+        (blocks-staked (- stacks-block-height (get last-claim stake-info)))
+        (reward-rate (var-get staking-reward-rate))
+        (base-reward (/ (* blocks-staked reward-rate) u1000))
+        (power-multiplier (/ creature-power u100))
+        (final-reward (* base-reward power-multiplier))
+      )
+      final-reward
+    )
+    u0
   )
 )
 
@@ -416,6 +459,73 @@
   )
 )
 
+(define-public (stake-creature (creature-id uint))
+  (let
+    (
+      (creature-info (unwrap! (get-creature creature-id) err-not-found))
+    )
+    (asserts! (is-eq tx-sender (get owner creature-info)) err-unauthorized)
+    (asserts! (not (is-staked creature-id)) err-already-staked)
+    (asserts! (not (is-creature-for-sale creature-id)) err-already-listed)
+    
+    (map-set staked-creatures creature-id
+      {
+        staker: tx-sender,
+        staked-at: stacks-block-height,
+        last-claim: stacks-block-height,
+        total-claimed: u0
+      }
+    )
+    
+    (var-set total-staked-creatures (+ (var-get total-staked-creatures) u1))
+    (ok true)
+  )
+)
+
+(define-public (unstake-creature (creature-id uint))
+  (let
+    (
+      (creature-info (unwrap! (get-creature creature-id) err-not-found))
+      (stake-info (unwrap! (get-staking-info creature-id) err-not-staked))
+      (blocks-staked (- stacks-block-height (get staked-at stake-info)))
+      (pending-rewards (calculate-staking-rewards creature-id))
+    )
+    (asserts! (is-eq tx-sender (get staker stake-info)) err-unauthorized)
+    (asserts! (>= blocks-staked (var-get minimum-stake-period)) err-minimum-stake-period)
+    
+    (if (> pending-rewards u0)
+      (try! (stx-transfer? pending-rewards contract-owner tx-sender))
+      true
+    )
+    
+    (map-delete staked-creatures creature-id)
+    (var-set total-staked-creatures (- (var-get total-staked-creatures) u1))
+    (ok pending-rewards)
+  )
+)
+
+(define-public (claim-staking-rewards (creature-id uint))
+  (let
+    (
+      (stake-info (unwrap! (get-staking-info creature-id) err-not-staked))
+      (pending-rewards (calculate-staking-rewards creature-id))
+    )
+    (asserts! (is-eq tx-sender (get staker stake-info)) err-unauthorized)
+    (asserts! (> pending-rewards u0) err-insufficient-payment)
+    
+    (try! (stx-transfer? pending-rewards contract-owner tx-sender))
+    
+    (map-set staked-creatures creature-id
+      (merge stake-info {
+        last-claim: stacks-block-height,
+        total-claimed: (+ (get total-claimed stake-info) pending-rewards)
+      })
+    )
+    
+    (ok pending-rewards)
+  )
+)
+
 (define-public (set-breeding-cost (new-cost uint))
   (begin
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
@@ -510,4 +620,55 @@
     total-listings: (var-get next-listing-id),
     fee-percent: (var-get marketplace-fee-percent)
   }
+)
+
+(define-public (set-staking-reward-rate (new-rate uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (var-set staking-reward-rate new-rate)
+    (ok true)
+  )
+)
+
+(define-public (set-minimum-stake-period (new-period uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (var-set minimum-stake-period new-period)
+    (ok true)
+  )
+)
+
+(define-read-only (get-staking-reward-rate)
+  (var-get staking-reward-rate)
+)
+
+(define-read-only (get-minimum-stake-period)
+  (var-get minimum-stake-period)
+)
+
+(define-read-only (get-total-staked-creatures)
+  (var-get total-staked-creatures)
+)
+
+(define-read-only (get-staking-stats)
+  {
+    total-staked: (var-get total-staked-creatures),
+    reward-rate: (var-get staking-reward-rate),
+    minimum-period: (var-get minimum-stake-period)
+  }
+)
+
+(define-read-only (get-user-staking-info (creature-id uint))
+  (match (get-staking-info creature-id)
+    stake-info
+    (some {
+      staker: (get staker stake-info),
+      staked-at: (get staked-at stake-info),
+      blocks-staked: (- stacks-block-height (get staked-at stake-info)),
+      pending-rewards: (calculate-staking-rewards creature-id),
+      total-claimed: (get total-claimed stake-info),
+      can-unstake: (>= (- stacks-block-height (get staked-at stake-info)) (var-get minimum-stake-period))
+    })
+    none
+  )
 )
