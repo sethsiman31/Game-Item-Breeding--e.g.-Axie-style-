@@ -672,3 +672,36 @@
     none
   )
 )
+
+(define-read-only (preview-breeding (parent1-id uint) (parent2-id uint) (seed uint))
+  (match (get-creature parent1-id)
+    parent1
+    (match (get-creature parent2-id)
+      parent2
+      (let
+        (
+          (generation (+ (if (> (get generation parent1) (get generation parent2)) (get generation parent1) (get generation parent2)) u1))
+          (random-base (+ seed parent1-id parent2-id))
+          (child-strength (calculate-trait (get strength parent1) (get strength parent2) (mod random-base u100)))
+          (child-speed (calculate-trait (get speed parent1) (get speed parent2) (mod (+ random-base u1) u100)))
+          (child-intelligence (calculate-trait (get intelligence parent1) (get intelligence parent2) (mod (+ random-base u2) u100)))
+          (child-vitality (calculate-trait (get vitality parent1) (get vitality parent2) (mod (+ random-base u3) u100)))
+          (child-health (calculate-trait (get vitality parent1) (get vitality parent2) (mod (+ random-base u4) u100)))
+          (can-breed-now (and (not (is-eq parent1-id parent2-id)) (can-breed parent1-id) (can-breed parent2-id) (< generation u10)))
+        )
+        (some {
+          generation: generation,
+          cost: (get-breeding-cost generation),
+          strength: child-strength,
+          speed: child-speed,
+          intelligence: child-intelligence,
+          vitality: child-vitality,
+          health: child-health,
+          can-breed: can-breed-now
+        })
+      )
+      none
+    )
+    none
+  )
+)
