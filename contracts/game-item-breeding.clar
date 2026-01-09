@@ -703,5 +703,68 @@
       none
     )
     none
+  ) 
+)
+
+(define-constant err-no-approval (err u116))
+(define-constant err-not-approved (err u117))
+
+(define-map operator-approvals
+  uint
+  {
+    operator: principal,
+    active: bool
+  }
+)
+
+(define-read-only (get-operator-approval (creature-id uint))
+  (map-get? operator-approvals creature-id)
+)
+
+(define-read-only (is-approved-operator (creature-id uint) (operator principal))
+  (match (map-get? operator-approvals creature-id)
+    info
+    (and (get active info) (is-eq operator (get operator info)))
+    false
+  )
+)
+
+(define-public (set-operator-approval (creature-id uint) (operator principal))
+  (let
+    (
+      (creature-info (unwrap! (get-creature creature-id) err-not-found))
+    )
+    (asserts! (is-eq tx-sender (get owner creature-info)) err-unauthorized)
+    (map-set operator-approvals creature-id { operator: operator, active: true })
+    (ok true)
+  )
+)
+
+(define-public (clear-operator-approval (creature-id uint))
+  (let
+    (
+      (creature-info (unwrap! (get-creature creature-id) err-not-found))
+    )
+    (asserts! (is-eq tx-sender (get owner creature-info)) err-unauthorized)
+    (map-delete operator-approvals creature-id)
+    (ok true)
+  )
+)
+
+(define-public (transfer-creature-by-operator (creature-id uint) (recipient principal))
+  (let
+    (
+      (creature-info (unwrap! (get-creature creature-id) err-not-found))
+      (owner (get owner creature-info))
+      (approval-info (unwrap! (map-get? operator-approvals creature-id) err-no-approval))
+      (is-active (get active approval-info))
+      (approved-operator (get operator approval-info))
+    )
+    (asserts! is-active err-not-approved)
+    (asserts! (is-eq tx-sender approved-operator) err-not-approved)
+    (try! (nft-transfer? creature creature-id owner recipient))
+    (map-set creature-data creature-id (merge creature-info { owner: recipient }))
+    (map-delete operator-approvals creature-id)
+    (ok true)
   )
 )
